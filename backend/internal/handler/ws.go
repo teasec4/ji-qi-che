@@ -120,6 +120,7 @@ func (h *Hub) handlePayload(conn *websocket.Conn, payload []byte) {
 		}
 	}
 
+	// а зачем нам это нужно?
 	// Backward-compatible path for sending raw command JSON from controllers.
 	var cmd model.Command
 	if err := json.Unmarshal(payload, &cmd); err != nil {
@@ -129,6 +130,8 @@ func (h *Hub) handlePayload(conn *websocket.Conn, payload []byte) {
 	h.handleCommand(cmd)
 }
 
+// а не стоп и не ресет как обрабатывается? или это как раз
+// там где идет проверка на TTL, получается на нее надежда?
 func (h *Hub) handleCommand(cmd model.Command) {
 	cmd.X = clamp(cmd.X, -1, 1)
 	cmd.Y = clamp(cmd.Y, -1, 1)

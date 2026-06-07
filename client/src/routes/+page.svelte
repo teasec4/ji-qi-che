@@ -238,7 +238,7 @@
 								{#each robot.commandLog as item (item.id)}
 									<div class="grid grid-cols-[76px_1fr] gap-2 border-b border-slate-100 pb-2">
 										<span class="font-mono text-xs text-slate-500">{item.at}</span>
-										<span class="break-words font-mono text-xs text-slate-800">{item.text}</span>
+										<span class="wrap-break-words font-mono text-xs text-slate-800">{item.text}</span>
 									</div>
 								{/each}
 							{/if}
