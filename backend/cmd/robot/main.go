@@ -3,22 +3,28 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"log"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"roboback/internal/model"
 	"roboback/internal/robot"
 )
 
 func main() {
+	hubURL := flag.String("hub", "ws://localhost:8080/ws", "hub websocket url")
+	robotID := flag.String("id", model.DefaultRobotID, "robot id")
+	flag.Parse()
+
 	ctrl := robot.NewMockController()
-	driver := robot.NewDriver("ws://localhost:8080/ws", ctrl)
+	driver := robot.NewDriver(*hubURL, *robotID, ctrl)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	log.Println("robot driver starting, connecting to ws://localhost:8080/ws")
+	log.Printf("robot driver starting, connecting to %s as %s", *hubURL, model.NormalizeRobotID(*robotID))
 	for {
 		err := driver.Run(ctx)
 		if err == nil || errors.Is(err, context.Canceled) {

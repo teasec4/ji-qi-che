@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"roboback/internal/model"
+	"sort"
 	"sync"
 	"time"
 
@@ -19,24 +20,28 @@ var upgrader = websocket.Upgrader{
 }
 
 type client struct {
-	conn *websocket.Conn
-	role model.ClientRole
+	conn    *websocket.Conn
+	role    model.ClientRole
+	robotID string
 	// Gorilla allows one writer at a time per connection.
 	writeMu sync.Mutex
 }
 
-type Hub struct {
-	mu      sync.Mutex
-	clients map[*websocket.Conn]*client
-	// lastCommand/moving are the server-side deadman switch. The controller
-	// must keep refreshing move commands; otherwise robots get a forced stop.
+type robotRuntime struct {
 	lastCommand time.Time
 	moving      bool
 }
 
+type Hub struct {
+	mu          sync.Mutex
+	clients     map[*websocket.Conn]*client
+	robotStates map[string]robotRuntime
+}
+
 func NewHub() *Hub {
 	return &Hub{
-		clients: make(map[*websocket.Conn]*client),
+		clients:     make(map[*websocket.Conn]*client),
+		robotStates: make(map[string]robotRuntime),
 	}
 }
 
@@ -65,11 +70,11 @@ func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		removed := h.remove(conn)
 		conn.Close()
-		log.Printf("client disconnected: role=%s", removed.role)
+		log.Printf("client disconnected: role=%s robot=%s", removed.role, removed.robotID)
 
 		// Losing every controller means no one can intentionally stop the car.
 		if removed.role == model.RoleController && h.counts().Controllers == 0 {
-			h.forceStop("controller disconnected")
+			h.forceStopAll("controller disconnected")
 		}
 		h.broadcastClients()
 	}()
@@ -99,15 +104,21 @@ func (h *Hub) handlePayload(conn *websocket.Conn, payload []byte) {
 	if err := json.Unmarshal(payload, &msg); err == nil {
 		switch msg.Type {
 		case "hello":
-			h.setRole(conn, msg.Role)
+			h.setRole(conn, msg.Role, msg.RobotID)
 			return
 		case "status":
 			h.handleStatus(conn, msg.Status)
 			return
 		case "command":
-			h.handleCommandFrom(conn, msg.Command)
+			h.handleCommandFrom(conn, msg.TargetRobotID, msg.Command)
 			return
 		}
+	}
+
+	var cmd model.Command
+	if err := json.Unmarshal(payload, &cmd); err == nil && cmd.Type != "" {
+		h.handleCommandFrom(conn, model.DefaultRobotID, &cmd)
+		return
 	}
 
 	log.Printf("bad ws payload")
@@ -117,7 +128,8 @@ func (h *Hub) handleStatus(conn *websocket.Conn, status *model.RobotStatus) {
 	if status == nil {
 		return
 	}
-	if h.roleOf(conn) != model.RoleRobot {
+	role, robotID := h.clientInfo(conn)
+	if role != model.RoleRobot {
 		log.Printf("ignored status from non-robot client")
 		return
 	}
@@ -125,12 +137,13 @@ func (h *Hub) handleStatus(conn *websocket.Conn, status *model.RobotStatus) {
 	// Robot status is reported by the robot client and forwarded to UIs.
 	h.broadcastToRole(model.RoleController, model.ServerMessage{
 		Type:    "robot_status",
+		RobotID: robotID,
 		Clients: h.counts(),
 		Status:  status,
 	})
 }
 
-func (h *Hub) handleCommandFrom(conn *websocket.Conn, cmd *model.Command) {
+func (h *Hub) handleCommandFrom(conn *websocket.Conn, targetRobotID string, cmd *model.Command) {
 	if cmd == nil {
 		return
 	}
@@ -139,54 +152,91 @@ func (h *Hub) handleCommandFrom(conn *websocket.Conn, cmd *model.Command) {
 		return
 	}
 
-	h.handleCommand(*cmd)
+	h.handleCommand(model.NormalizeRobotID(targetRobotID), *cmd)
 }
 
-func (h *Hub) handleCommand(cmd model.Command) {
+func (h *Hub) handleCommand(robotID string, cmd model.Command) {
 	cmd.X = clamp(cmd.X, -1, 1)
 	cmd.Y = clamp(cmd.Y, -1, 1)
 
 	switch cmd.Type {
 	case model.CommandMove:
 		h.mu.Lock()
-		h.lastCommand = time.Now()
-		h.moving = true
+		state := h.robotStates[robotID]
+		state.lastCommand = time.Now()
+		state.moving = true
+		h.robotStates[robotID] = state
 		h.mu.Unlock()
 	case model.CommandStop, model.CommandReset:
 		h.mu.Lock()
-		h.moving = false
+		state := h.robotStates[robotID]
+		state.moving = false
+		h.robotStates[robotID] = state
 		h.mu.Unlock()
 	default:
 		log.Printf("unknown command: %s", cmd.Type)
 		return
 	}
 
-	log.Printf("command: type=%s x=%.2f y=%.2f note=%s", cmd.Type, cmd.X, cmd.Y, cmd.Note)
+	log.Printf("command: robot=%s type=%s x=%.2f y=%.2f note=%s", robotID, cmd.Type, cmd.X, cmd.Y, cmd.Note)
 	// The backend is a broker: commands go to robots, acknowledgements go to UIs.
-	h.broadcastCommand("command", cmd, model.RoleRobot)
-	h.broadcastCommand("command_ack", cmd, model.RoleController)
+	h.broadcastCommandToRobot(robotID, "command", cmd)
+	h.broadcastCommandToControllers(robotID, "command_ack", cmd)
 }
 
 func (h *Hub) checkDeadman() {
 	h.mu.Lock()
-	shouldStop := h.moving && time.Since(h.lastCommand) > commandTTL
-	if shouldStop {
-		h.moving = false
+	now := time.Now()
+	robotIDs := make([]string, 0)
+	for robotID, state := range h.robotStates {
+		if state.moving && now.Sub(state.lastCommand) > commandTTL {
+			state.moving = false
+			h.robotStates[robotID] = state
+			robotIDs = append(robotIDs, robotID)
+		}
 	}
 	h.mu.Unlock()
 
-	if shouldStop {
-		h.forceStop("command timeout")
+	sort.Strings(robotIDs)
+	for _, robotID := range robotIDs {
+		h.forceStop(robotID, "command timeout")
 	}
 }
 
-func (h *Hub) forceStop(reason string) {
+func (h *Hub) forceStopAll(reason string) {
+	h.mu.Lock()
+	robotIDSet := make(map[string]struct{})
+	for robotID, state := range h.robotStates {
+		if state.moving {
+			state.moving = false
+			h.robotStates[robotID] = state
+			robotIDSet[robotID] = struct{}{}
+		}
+	}
+	for _, current := range h.clients {
+		if current.role == model.RoleRobot {
+			robotIDSet[model.NormalizeRobotID(current.robotID)] = struct{}{}
+		}
+	}
+	h.mu.Unlock()
+
+	robotIDs := make([]string, 0, len(robotIDSet))
+	for robotID := range robotIDSet {
+		robotIDs = append(robotIDs, robotID)
+	}
+	sort.Strings(robotIDs)
+	for _, robotID := range robotIDs {
+		h.forceStop(robotID, reason)
+	}
+}
+
+func (h *Hub) forceStop(robotID string, reason string) {
 	cmd := model.Command{Type: model.CommandStop, Note: "failsafe: " + reason}
-	log.Printf("failsafe stop: %s", reason)
+	log.Printf("failsafe stop: robot=%s reason=%s", robotID, reason)
 	// Failsafe is also delivered as a normal stop command so real motor code can
 	// treat it exactly like a user stop, with the reason kept in Note.
-	h.broadcastCommand("command", cmd, model.RoleRobot)
-	h.broadcastCommand("failsafe", cmd, model.RoleController)
+	h.broadcastCommandToRobot(robotID, "command", cmd)
+	h.broadcastCommandToControllers(robotID, "failsafe", cmd)
 }
 
 func (h *Hub) add(conn *websocket.Conn) {
@@ -207,33 +257,43 @@ func (h *Hub) remove(conn *websocket.Conn) client {
 	return *current
 }
 
-func (h *Hub) setRole(conn *websocket.Conn, role model.ClientRole) {
+func (h *Hub) setRole(conn *websocket.Conn, role model.ClientRole, robotID string) {
 	if role != model.RoleRobot {
 		role = model.RoleController
+		robotID = ""
+	} else {
+		robotID = model.NormalizeRobotID(robotID)
 	}
 
 	h.mu.Lock()
 	if current := h.clients[conn]; current != nil {
 		current.role = role
+		current.robotID = robotID
 	}
 	h.mu.Unlock()
 
 	h.send(conn, model.ServerMessage{
 		Type:    "role",
 		Role:    role,
+		RobotID: robotID,
 		Clients: h.counts(),
 	})
 	h.broadcastClients()
 }
 
-func (h *Hub) roleOf(conn *websocket.Conn) model.ClientRole {
+func (h *Hub) clientInfo(conn *websocket.Conn) (model.ClientRole, string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	if current := h.clients[conn]; current != nil {
-		return current.role
+		return current.role, current.robotID
 	}
-	return model.RoleController
+	return model.RoleController, ""
+}
+
+func (h *Hub) roleOf(conn *websocket.Conn) model.ClientRole {
+	role, _ := h.clientInfo(conn)
+	return role
 }
 
 func (h *Hub) broadcastClients() {
@@ -243,12 +303,37 @@ func (h *Hub) broadcastClients() {
 	})
 }
 
-func (h *Hub) broadcastCommand(messageType string, cmd model.Command, role model.ClientRole) {
-	h.broadcastToRole(role, model.ServerMessage{
+func (h *Hub) broadcastCommandToRobot(robotID string, messageType string, cmd model.Command) {
+	h.broadcastToRobot(robotID, model.ServerMessage{
 		Type:    messageType,
+		RobotID: robotID,
 		Clients: h.counts(),
 		Command: &cmd,
 	})
+}
+
+func (h *Hub) broadcastCommandToControllers(robotID string, messageType string, cmd model.Command) {
+	h.broadcastToRole(model.RoleController, model.ServerMessage{
+		Type:    messageType,
+		RobotID: robotID,
+		Clients: h.counts(),
+		Command: &cmd,
+	})
+}
+
+func (h *Hub) broadcastToRobot(robotID string, msg model.ServerMessage) {
+	h.mu.Lock()
+	targets := make([]*websocket.Conn, 0, len(h.clients))
+	for conn, current := range h.clients {
+		if current.role == model.RoleRobot && current.robotID == robotID {
+			targets = append(targets, conn)
+		}
+	}
+	h.mu.Unlock()
+
+	for _, conn := range targets {
+		h.send(conn, msg)
+	}
 }
 
 func (h *Hub) broadcastToRole(role model.ClientRole, msg model.ServerMessage) {
@@ -304,14 +389,23 @@ func (h *Hub) counts() model.ClientCounts {
 	defer h.mu.Unlock()
 
 	var counts model.ClientCounts
+	robotIDs := make(map[string]struct{})
 	for _, current := range h.clients {
 		switch current.role {
 		case model.RoleRobot:
 			counts.Robots++
+			robotIDs[model.NormalizeRobotID(current.robotID)] = struct{}{}
 		default:
 			counts.Controllers++
 		}
 	}
+
+	counts.RobotIDs = make([]string, 0, len(robotIDs))
+	for robotID := range robotIDs {
+		counts.RobotIDs = append(counts.RobotIDs, robotID)
+	}
+	sort.Strings(counts.RobotIDs)
+
 	return counts
 }
 

@@ -18,14 +18,16 @@ const watchdogTTL = 700 * time.Millisecond
 // MotorController, and reports controller status back.
 type Driver struct {
 	hubURL     string
+	robotID    string
 	controller MotorController
 	controlMu  sync.Mutex
 	moving     bool
 }
 
-func NewDriver(hubURL string, controller MotorController) *Driver {
+func NewDriver(hubURL string, robotID string, controller MotorController) *Driver {
 	return &Driver{
 		hubURL:     hubURL,
+		robotID:    model.NormalizeRobotID(robotID),
 		controller: controller,
 	}
 }
@@ -39,13 +41,14 @@ func (d *Driver) Run(ctx context.Context) error {
 
 	// Register as robot so the Hub routes commands to us.
 	hello, _ := json.Marshal(model.ClientMessage{
-		Type: "hello",
-		Role: model.RoleRobot,
+		Type:    "hello",
+		Role:    model.RoleRobot,
+		RobotID: d.robotID,
 	})
 	if err := conn.WriteMessage(websocket.TextMessage, hello); err != nil {
 		return err
 	}
-	log.Printf("robot driver connected to %s", d.hubURL)
+	log.Printf("robot driver connected to %s as %s", d.hubURL, d.robotID)
 	defer func() {
 		d.controlMu.Lock()
 		defer d.controlMu.Unlock()
@@ -107,6 +110,10 @@ func (d *Driver) readLoop(conn *websocket.Conn, moveSeen chan<- struct{}, stoppe
 		}
 
 		if msg.Command == nil {
+			continue
+		}
+		if msg.RobotID != "" && msg.RobotID != d.robotID {
+			log.Printf("robot driver: ignored command for robot %s", msg.RobotID)
 			continue
 		}
 
@@ -176,8 +183,9 @@ func (d *Driver) sendStatus(conn *websocket.Conn) {
 	d.controlMu.Unlock()
 
 	payload, err := json.Marshal(model.ClientMessage{
-		Type:   "status",
-		Status: &status,
+		Type:    "status",
+		RobotID: d.robotID,
+		Status:  &status,
 	})
 	if err != nil {
 		return
