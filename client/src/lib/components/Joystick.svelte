@@ -12,19 +12,25 @@
 
 	let { disabled = false, onmove, onstop }: Props = $props();
 
-	// что есть что пояснения? 
 	let pad: HTMLDivElement;
 	let active = $state(false);
+	// knob* is visual position in pixels; command* is normalized -1..1 output.
 	let knobX = $state(0);
 	let knobY = $state(0);
 	let commandX = $state(0);
 	let commandY = $state(0);
+	let pendingPoint: { x: number; y: number } | null = null;
+	let frame = 0;
 
 	const radius = 76;
 
-	// странно выглядит какбудто немного дергается
 	let knobStyle = $derived(
 		`transform: translate(calc(-50% + ${knobX}px), calc(-50% + ${knobY}px));`
+	);
+	let knobClass = $derived(
+		`absolute left-1/2 top-1/2 h-20 w-20 rounded-full border border-slate-900 bg-white shadow-lg will-change-transform ${
+			active ? '' : 'transition-transform duration-100 ease-out'
+		}`
 	);
 
 	function start(event: PointerEvent) {
@@ -41,19 +47,38 @@
 			return;
 		}
 
+		pendingPoint = { x: event.clientX, y: event.clientY };
+		if (!frame) {
+			frame = requestAnimationFrame(applyPendingPoint);
+		}
+	}
+
+	function applyPendingPoint() {
+		frame = 0;
+		if (!pendingPoint || !active || disabled) {
+			return;
+		}
+
 		const rect = pad.getBoundingClientRect();
 		const centerX = rect.left + rect.width / 2;
 		const centerY = rect.top + rect.height / 2;
-		const rawX = event.clientX - centerX;
-		const rawY = event.clientY - centerY;
+		const rawX = pendingPoint.x - centerX;
+		const rawY = pendingPoint.y - centerY;
 		const distance = Math.hypot(rawX, rawY);
 		const scale = distance > radius ? radius / distance : 1;
+		const nextX = rawX * scale;
+		const nextY = rawY * scale;
+		const nextCommandX = round(-nextY / radius);
+		const nextCommandY = round(nextX / radius);
 
-		knobX = rawX * scale;
-		knobY = rawY * scale;
-		commandX = round(-knobY / radius);
-		commandY = round(knobX / radius);
-		onmove?.({ x: commandX, y: commandY });
+		knobX = nextX;
+		knobY = nextY;
+
+		if (nextCommandX !== commandX || nextCommandY !== commandY) {
+			commandX = nextCommandX;
+			commandY = nextCommandY;
+			onmove?.({ x: commandX, y: commandY });
+		}
 	}
 
 	function end(event: PointerEvent) {
@@ -62,6 +87,11 @@
 		}
 		active = false;
 		pad.releasePointerCapture(event.pointerId);
+		pendingPoint = null;
+		if (frame) {
+			cancelAnimationFrame(frame);
+			frame = 0;
+		}
 		knobX = 0;
 		knobY = 0;
 		commandX = 0;
@@ -97,7 +127,7 @@
 		<div class="absolute left-3 top-1/2 -translate-y-1/2 text-xs font-medium text-slate-500">L</div>
 		<div class="absolute right-3 top-1/2 -translate-y-1/2 text-xs font-medium text-slate-500">R</div>
 		<div
-			class="absolute left-1/2 top-1/2 h-20 w-20 rounded-full border border-slate-900 bg-white shadow-lg transition-transform duration-75"
+			class={knobClass}
 			style={knobStyle}
 		></div>
 	</div>

@@ -10,9 +10,9 @@ import {
 type MessageHandler = (data: ServerMessage) => void;
 
 type ClientMessage =
-  Command |
-  { type: 'hello', role: ClientRole } |
-  { type: 'status', status: RobotStatus }
+	| { type: 'command'; command: Command }
+	| { type: 'hello'; role: ClientRole }
+	| { type: 'status'; status: RobotStatus };
 
 export class RobotSocket {
 	private ws: WebSocket | null = null;
@@ -74,7 +74,7 @@ export class RobotSocket {
 	}
 
 	sendCommand(command: Command, options: { log?: boolean } = {}) {
-		if (!this.rawSend(command)) {
+		if (!this.rawSend({ type: 'command', command })) {
 			addLog(`skipped ${command.type}: ws offline`);
 			return;
 		}
@@ -112,8 +112,6 @@ export class RobotSocket {
 		robot.commandLog = [];
 	}
 
-	// а может сюда можно тип добавить? Command 
-	// или ClientMessage с общей типизацией
 	private rawSend(payload: ClientMessage) {
 		if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
 			return false;
@@ -122,7 +120,6 @@ export class RobotSocket {
 		return true;
 	}
 
-	// почему СТринг? 
 	private parse(data: string): ServerMessage | null {
 		try {
 			return JSON.parse(data) as ServerMessage;

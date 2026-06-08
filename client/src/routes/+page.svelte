@@ -21,8 +21,11 @@
 	});
 
 	function sendMove(value: { x: number; y: number }) {
-		heldMove = value; 
-		sendCommand({ type: 'move', x: value.x, y: value.y });
+		const shouldStartHold = !heldMove;
+		heldMove = value;
+		if (shouldStartHold) {
+			sendCommand({ type: 'move', x: value.x, y: value.y });
+		}
 		ensureHoldLoop();
 	}
 
@@ -69,15 +72,15 @@
 			return;
 		}
 
-		// Move commands are "deadman" commands: one click starts movement, then
+		// Move commands are "deadman" commands: one send starts movement, then
 		// quiet hold packets keep it alive until the scenario step ends.
 		const endAt = Date.now() + ms;
 		socket.sendCommand(command);
-		await sleep(240);
+		await sleep(120);
 
 		while (Date.now() < endAt) {
 			socket.sendCommand({ ...command, note: 'hold' }, { log: false });
-			await sleep(240);
+			await sleep(120);
 		}
 	}
 
@@ -95,7 +98,7 @@
 			}
 
 			socket.sendCommand({ type: 'move', x: heldMove.x, y: heldMove.y, note: 'hold' }, { log: false });
-		}, 240);
+		}, 120);
 	}
 
 	function clearHeldMove() {
