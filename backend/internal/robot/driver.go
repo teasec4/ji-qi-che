@@ -12,7 +12,7 @@ import (
 )
 
 // Driver connects to the Hub as a robot, receives commands, drives the
-// MotorController, and reports telemetry back.
+// MotorController, and reports controller status back.
 type Driver struct {
 	hubURL     string
 	controller MotorController
@@ -41,13 +41,19 @@ func (d *Driver) Run(ctx context.Context) error {
 		return err
 	}
 	log.Printf("robot driver connected to %s", d.hubURL)
+	defer func() {
+		if err := d.controller.Stop(); err != nil {
+			log.Printf("robot driver: stop on shutdown failed: %v", err)
+		}
+	}()
 
-	// Periodic telemetry push.
+	// Periodic status push.
 	statusTicker := time.NewTicker(250 * time.Millisecond)
 	defer statusTicker.Stop()
 
 	// Separate goroutine for reading so status can be sent independently.
 	readErr := make(chan error, 1)
+
 	go func() {
 		readErr <- d.readLoop(conn)
 	}()
@@ -101,7 +107,7 @@ func (d *Driver) readLoop(conn *websocket.Conn) error {
 }
 
 func (d *Driver) sendStatus(conn *websocket.Conn) {
-	status := d.controller.Telemetry()
+	status := d.controller.Status()
 	payload, err := json.Marshal(model.ClientMessage{
 		Type:   "status",
 		Status: &status,

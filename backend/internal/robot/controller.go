@@ -2,6 +2,7 @@ package robot
 
 import (
 	"log"
+	"sync"
 
 	"roboback/internal/model"
 )
@@ -12,19 +13,20 @@ type MotorController interface {
 	Move(forward, turn float64) error
 	Stop() error
 	Reset() error
-	Telemetry() model.RobotStatus
+	Status() model.RobotStatus
 }
 
 type ControllerMode string
 
 const (
-	ControllerModeIdle ControllerMode = "idle"
+	ControllerModeIdle   ControllerMode = "idle"
 	ControllerModeMoving ControllerMode = "moving"
-	
 )
+
 // MockController logs every command to stdout.
 // Replace with GPIOController when the real hardware is wired up.
 type MockController struct {
+	mu   sync.Mutex
 	mode ControllerMode
 }
 
@@ -33,24 +35,38 @@ func NewMockController() *MockController {
 }
 
 func (m *MockController) Move(forward, turn float64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	m.mode = ControllerModeMoving
 	log.Printf("[mock] MOVE forward=%.2f turn=%.2f", forward, turn)
 	return nil
 }
 
 func (m *MockController) Stop() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	m.mode = ControllerModeIdle
 	log.Println("[mock] STOP")
 	return nil
 }
 
 func (m *MockController) Reset() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	m.mode = ControllerModeIdle
 	log.Println("[mock] RESET")
 	return nil
 }
 
-// Telemetry reports the current controller state for the Hub to broadcast.
-func (m *MockController) Telemetry() model.RobotStatus {
-	return model.RobotStatus{}	
+// Status reports the current controller state for the Hub to broadcast.
+func (m *MockController) Status() model.RobotStatus {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return model.RobotStatus{
+		Mode: string(m.mode),
+	}
 }

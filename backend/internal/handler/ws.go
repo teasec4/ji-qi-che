@@ -40,7 +40,6 @@ func NewHub() *Hub {
 	}
 }
 
-// tiker.C что значит? просто периодичность срабатывания?
 func (h *Hub) Run(ctx context.Context) {
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
@@ -103,35 +102,46 @@ func (h *Hub) handlePayload(conn *websocket.Conn, payload []byte) {
 			h.setRole(conn, msg.Role)
 			return
 		case "status":
-			if msg.Status != nil {
-				// Robot status is reported by the robot client and forwarded to UIs.
-				h.broadcastToRole(model.RoleController, model.ServerMessage{
-					Type:    "robot_status",
-					Clients: h.counts(),
-					Status:  msg.Status,
-				})
-			}
+			h.handleStatus(conn, msg.Status)
 			return
 		case "command":
-			if msg.Command != nil {
-				h.handleCommand(*msg.Command)
-			}
+			h.handleCommandFrom(conn, msg.Command)
 			return
 		}
 	}
 
-	// а зачем нам это нужно?
-	// Backward-compatible path for sending raw command JSON from controllers.
-	var cmd model.Command
-	if err := json.Unmarshal(payload, &cmd); err != nil {
-		log.Printf("bad ws payload: %v", err)
-		return
-	}
-	h.handleCommand(cmd)
+	log.Printf("bad ws payload")
 }
 
-// а не стоп и не ресет как обрабатывается? или это как раз
-// там где идет проверка на TTL, получается на нее надежда?
+func (h *Hub) handleStatus(conn *websocket.Conn, status *model.RobotStatus) {
+	if status == nil {
+		return
+	}
+	if h.roleOf(conn) != model.RoleRobot {
+		log.Printf("ignored status from non-robot client")
+		return
+	}
+
+	// Robot status is reported by the robot client and forwarded to UIs.
+	h.broadcastToRole(model.RoleController, model.ServerMessage{
+		Type:    "robot_status",
+		Clients: h.counts(),
+		Status:  status,
+	})
+}
+
+func (h *Hub) handleCommandFrom(conn *websocket.Conn, cmd *model.Command) {
+	if cmd == nil {
+		return
+	}
+	if h.roleOf(conn) != model.RoleController {
+		log.Printf("ignored command from non-controller client")
+		return
+	}
+
+	h.handleCommand(*cmd)
+}
+
 func (h *Hub) handleCommand(cmd model.Command) {
 	cmd.X = clamp(cmd.X, -1, 1)
 	cmd.Y = clamp(cmd.Y, -1, 1)
@@ -185,7 +195,6 @@ func (h *Hub) add(conn *websocket.Conn) {
 	h.clients[conn] = &client{conn: conn, role: model.RoleController}
 }
 
-// если тут remove зачем что-то возвращать?
 func (h *Hub) remove(conn *websocket.Conn) client {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -198,7 +207,6 @@ func (h *Hub) remove(conn *websocket.Conn) client {
 	return *current
 }
 
-// зачем тут вконце h.broadcastClients() ? 
 func (h *Hub) setRole(conn *websocket.Conn, role model.ClientRole) {
 	if role != model.RoleRobot {
 		role = model.RoleController
@@ -216,6 +224,16 @@ func (h *Hub) setRole(conn *websocket.Conn, role model.ClientRole) {
 		Clients: h.counts(),
 	})
 	h.broadcastClients()
+}
+
+func (h *Hub) roleOf(conn *websocket.Conn) model.ClientRole {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if current := h.clients[conn]; current != nil {
+		return current.role
+	}
+	return model.RoleController
 }
 
 func (h *Hub) broadcastClients() {
